@@ -1,1 +1,54 @@
-/**\n * Verify tender identity matches between listing and modal\n * Compare: Tender Number, Reference, Department, Description\n */\n\nconst { SELECTORS } = require('../utils/selectors');\nconst logger = require('../utils/logger');\n\nclass IdentityVerifier {\n  constructor(page, log) {\n    this.page = page;\n    this.logger = log;\n  }\n\n  async verify(expectedTender) {\n    try {\n      // Extract from modal\n      const modalData = await this.extractModalIdentity();\n\n      // Compare\n      const matches = this.compareIdentity(expectedTender, modalData);\n\n      if (!matches) {\n        this.logger.warn('❌ Identity mismatch', {\n          expected: expectedTender,\n          actual: modalData,\n        });\n        return false;\n      }\n\n      this.logger.info('✅ Identity verified');\n      return true;\n    } catch (error) {\n      this.logger.error('Identity verification error', { error: error.message });\n      return false;\n    }\n  }\n\n  async extractModalIdentity() {\n    return await this.page.evaluate(() => {\n      const getText = (selector) => {\n        const el = document.querySelector(selector);\n        return el ? (el.textContent || el.innerText || '').trim() : '';\n      };\n\n      return {\n        tender_number: getText('label:contains(\"Tender Number\") ~ span') || getText('[ng-bind*=\"tenderNumber\"]'),\n        reference: getText('label:contains(\"Reference\") ~ span') || getText('[ng-bind*=\"referenceNumber\"]'),\n        department: getText('label:contains(\"Department\") ~ span') || getText('[ng-bind*=\"department\"]'),\n        description: getText('label:contains(\"Description\") ~ span') || getText('[ng-bind*=\"description\"]'),\n      };\n    });\n  }\n\n  compareIdentity(expected, actual) {\n    // Require at least 2 of 4 fields to match\n    let matches = 0;\n\n    if (this.normalize(expected.tender_number) === this.normalize(actual.tender_number)) matches++;\n    if (this.normalize(expected.reference_number) === this.normalize(actual.reference)) matches++;\n    if (this.normalize(expected.department) === this.normalize(actual.department)) matches++;\n    if (this.normalize(expected.description) === this.normalize(actual.description)) matches++;\n\n    return matches >= 2;\n  }\n\n  normalize(str) {\n    return (str || '').toLowerCase().trim().replace(/\\s+/g, ' ');\n  }\n}\n\nmodule.exports = { IdentityVerifier };\n
+const logger = require('../utils/logger');
+
+class IdentityVerifier {
+  constructor(page, log) {
+    this.page = page;
+    this.logger = log;
+  }
+
+  async verify(expectedTender) {
+    try {
+      const modalText = await this.page.textContent('#tender-modal, .modal-dialog, [role="dialog"]');
+
+      const tenderNumberMatch = modalText.includes(expectedTender.tender_number);
+      const referenceMatch = modalText.includes(expectedTender.reference_number);
+      const departmentMatch = modalText.includes(expectedTender.department);
+
+      const matchCount = [tenderNumberMatch, referenceMatch, departmentMatch].filter(Boolean).length;
+
+      if (matchCount >= 2) {
+        this.logger.info('✅ Identity verified');
+        return true;
+      }
+
+      this.logger.warn('❌ Identity mismatch', {
+        expected: expectedTender.tender_number,
+        matches: matchCount,
+      });
+      return false;
+    } catch (error) {
+      this.logger.error('Identity verification error', { error: error.message });
+      return false;
+    }
+  }
+
+  compareIdentity(expected, actual) {
+    const fields = ['tender_number', 'reference_number', 'department', 'description'];
+    let matches = 0;
+
+    for (const field of fields) {
+      if (expected[field] && actual[field]) {
+        if (
+          expected[field].toLowerCase().includes(actual[field].toLowerCase()) ||
+          actual[field].toLowerCase().includes(expected[field].toLowerCase())
+        ) {
+          matches++;
+        }
+      }
+    }
+
+    return matches >= 2;
+  }
+}
+
+module.exports = { IdentityVerifier };
