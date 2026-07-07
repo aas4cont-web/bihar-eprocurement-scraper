@@ -1,1 +1,164 @@
-/**\n * Main entry point for Bihar eProcurement Scraper\n */\n\nrequire('dotenv').config();\nconst logger = require('./utils/logger');\nconst { BrowserManager } = require('./browser/manager');\nconst { ListingPhase } = require('./scraper/listing');\nconst { ModalPhase } = require('./scraper/modal');\nconst { IdentityVerifier } = require('./scraper/identity');\nconst { ParserPhase } = require('./scraper/parser');\nconst { TenderValidator } = require('./validators/tender');\nconst { Database } = require('./db/connection');\nconst { RecoveryManager } = require('./scraper/recovery');\n\nclass ScraperPipeline {\n  constructor() {\n    this.browserManager = new BrowserManager();\n    this.database = new Database();\n    this.validator = new TenderValidator();\n    this.metrics = {\n      totalFound: 0,\n      successfullyScrapped: 0,\n      validationFailures: 0,\n      parseFailures: 0,\n      identityMismatches: 0,\n      staleContent: 0,\n      totalRetries: 0,\n      startTime: null,\n    };\n  }\n\n  async run() {\n    try {\n      this.metrics.startTime = Date.now();\n      logger.info('🚀 Starting Bihar eProcurement Scraper');\n\n      // Initialize browser\n      await this.browserManager.init();\n      const page = this.browserManager.page;\n\n      // Connect to database\n      await this.database.connect();\n\n      // Navigate to portal\n      const portalUrl = process.env.PORTAL_URL || 'https://bihar-eprocurement.portal.gov.in';\n      await page.goto(portalUrl, { waitUntil: 'domcontentloaded' });\n      logger.info('📄 Portal loaded', { url: portalUrl });\n\n      // Extract listings\n      const listingPhase = new ListingPhase(page, logger);\n      const tenders = await listingPhase.extract();\n      this.metrics.totalFound = tenders.length;\n      logger.info(`📋 Found ${tenders.length} tenders`);\n\n      // Process each tender\n      for (let i = 0; i < tenders.length; i++) {\n        const tender = tenders[i];\n        let retries = 0;\n        const maxRetries = parseInt(process.env.MAX_RETRIES || '3');\n\n        while (retries <= maxRetries) {\n          try {\n            logger.info(`⏳ Processing tender ${i + 1}/${tenders.length}`, {\n              tenderNumber: tender.tender_number,\n              reference: tender.reference_number,\n              retry: retries,\n            });\n\n            // Modal phase\n            const modalPhase = new ModalPhase(page, logger);\n            await modalPhase.openModal(tender);\n            await modalPhase.waitForStability();\n\n            // Identity verification\n            const verifier = new IdentityVerifier(page, logger);\n            const verified = await verifier.verify(tender);\n            if (!verified) {\n              this.metrics.identityMismatches++;\n              await modalPhase.closeModal();\n              throw new Error('Identity verification failed');\n            }\n\n            // Parse data\n            const parser = new ParserPhase(page, logger);\n            const data = await parser.parse();\n            Object.assign(data, {\n              tender_number: tender.tender_number,\n              reference_number: tender.reference_number,\n              department: tender.department,\n              description: tender.description,\n            });\n\n            // Validate\n            const validation = await this.validator.validate(data);\n            if (!validation.valid) {\n              this.metrics.validationFailures++;\n              await modalPhase.closeModal();\n              throw new Error(`Validation failed: ${validation.errors.join(', ')}`);\n            }\n\n            // Store in database\n            const result = await this.database.storeTender(data);\n            if (result) {\n              this.metrics.successfullyScrapped++;\n            }\n\n            // Close modal and move to next\n            await modalPhase.closeModal();\n            await page.waitForTimeout(500);\n            break; // Exit retry loop on success\n          } catch (error) {\n            retries++;\n            this.metrics.totalRetries++;\n            logger.warn(`❌ Tender processing failed (retry ${retries}/${maxRetries})`, {\n              error: error.message,\n              tender: tender.tender_number,\n            });\n\n            if (retries <= maxRetries) {\n              const recovery = new RecoveryManager(page, logger);\n              await recovery.executeRecoveryLadder(retries);\n            } else {\n              this.metrics.parseFailures++;\n              break;\n            }\n          }\n        }\n      }\n\n      // Final report\n      const runtime = (Date.now() - this.metrics.startTime) / 1000;\n      logger.info('✅ Scraping completed', {\n        totalFound: this.metrics.totalFound,\n        successfully_scraped: this.metrics.successfullyScrapped,\n        validation_failures: this.metrics.validationFailures,\n        parse_failures: this.metrics.parseFailures,\n        identity_mismatches: this.metrics.identityMismatches,\n        stale_content: this.metrics.staleContent,\n        total_retries: this.metrics.totalRetries,\n        runtime_seconds: runtime.toFixed(2),\n      });\n    } catch (error) {\n      logger.error('Pipeline failed', { error: error.message });\n      throw error;\n    } finally {\n      await this.browserManager.close();\n      await this.database.disconnect();\n    }\n  }\n}\n\n// Run pipeline\nif (require.main === module) {\n  const pipeline = new ScraperPipeline();\n  pipeline\n    .run()\n    .catch((error) => {\n      logger.error('Fatal error', { error: error.message });\n      process.exit(1);\n    });\n}\n\nmodule.exports = { ScraperPipeline };\n
+/**
+ * Main entry point for Bihar eProcurement Scraper
+ */
+
+require('dotenv').config();
+const logger = require('./utils/logger');
+const { BrowserManager } = require('./browser/manager');
+const { ListingPhase } = require('./scraper/listing');
+const { ModalPhase } = require('./scraper/modal');
+const { IdentityVerifier } = require('./scraper/identity');
+const { ParserPhase } = require('./scraper/parser');
+const { TenderValidator } = require('./validators/tender');
+const { Database } = require('./db/connection');
+const { RecoveryManager } = require('./scraper/recovery');
+
+class ScraperPipeline {
+  constructor() {
+    this.browserManager = new BrowserManager();
+    this.database = new Database();
+    this.validator = new TenderValidator();
+    this.metrics = {
+      totalFound: 0,
+      successfullyScrapped: 0,
+      validationFailures: 0,
+      parseFailures: 0,
+      identityMismatches: 0,
+      staleContent: 0,
+      totalRetries: 0,
+      startTime: null,
+    };
+  }
+
+  async run() {
+    try {
+      this.metrics.startTime = Date.now();
+      logger.info('🚀 Starting Bihar eProcurement Scraper');
+
+      // Initialize browser
+      await this.browserManager.init();
+      const page = this.browserManager.page;
+
+      // Connect to database
+      await this.database.connect();
+
+      // Navigate to portal
+      const portalUrl = process.env.PORTAL_URL || 'https://bihar-eprocurement.portal.gov.in';
+      await page.goto(portalUrl, { waitUntil: 'domcontentloaded' });
+      logger.info('📄 Portal loaded', { url: portalUrl });
+
+      // Extract listings
+      const listingPhase = new ListingPhase(page, logger);
+      const tenders = await listingPhase.extract();
+      this.metrics.totalFound = tenders.length;
+      logger.info(`📋 Found ${tenders.length} tenders`);
+
+      // Process each tender
+      for (let i = 0; i < tenders.length; i++) {
+        const tender = tenders[i];
+        let retries = 0;
+        const maxRetries = parseInt(process.env.MAX_RETRIES || '3');
+
+        while (retries <= maxRetries) {
+          try {
+            logger.info(`⏳ Processing tender ${i + 1}/${tenders.length}`, {
+              tenderNumber: tender.tender_number,
+              reference: tender.reference_number,
+              retry: retries,
+            });
+
+            // Modal phase
+            const modalPhase = new ModalPhase(page, logger);
+            await modalPhase.openModal(tender);
+            await modalPhase.waitForStability();
+
+            // Identity verification
+            const verifier = new IdentityVerifier(page, logger);
+            const verified = await verifier.verify(tender);
+            if (!verified) {
+              this.metrics.identityMismatches++;
+              await modalPhase.closeModal();
+              throw new Error('Identity verification failed');
+            }
+
+            // Parse data
+            const parser = new ParserPhase(page, logger);
+            const data = await parser.parse();
+            Object.assign(data, {
+              tender_number: tender.tender_number,
+              reference_number: tender.reference_number,
+              department: tender.department,
+              description: tender.description,
+            });
+
+            // Validate
+            const validation = await this.validator.validate(data);
+            if (!validation.valid) {
+              this.metrics.validationFailures++;
+              await modalPhase.closeModal();
+              throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+            }
+
+            // Store in database
+            const result = await this.database.storeTender(data);
+            if (result) {
+              this.metrics.successfullyScrapped++;
+            }
+
+            // Close modal and move to next
+            await modalPhase.closeModal();
+            await page.waitForTimeout(500);
+            break; // Exit retry loop on success
+          } catch (error) {
+            retries++;
+            this.metrics.totalRetries++;
+            logger.warn(`❌ Tender processing failed (retry ${retries}/${maxRetries})`, {
+              error: error.message,
+              tender: tender.tender_number,
+            });
+
+            if (retries <= maxRetries) {
+              const recovery = new RecoveryManager(page, logger);
+              await recovery.executeRecoveryLadder(retries);
+            } else {
+              this.metrics.parseFailures++;
+              break;
+            }
+          }
+        }
+      }
+
+      // Final report
+      const runtime = (Date.now() - this.metrics.startTime) / 1000;
+      logger.info('✅ Scraping completed', {
+        totalFound: this.metrics.totalFound,
+        successfully_scraped: this.metrics.successfullyScrapped,
+        validation_failures: this.metrics.validationFailures,
+        parse_failures: this.metrics.parseFailures,
+        identity_mismatches: this.metrics.identityMismatches,
+        stale_content: this.metrics.staleContent,
+        total_retries: this.metrics.totalRetries,
+        runtime_seconds: runtime.toFixed(2),
+      });
+    } catch (error) {
+      logger.error('Pipeline failed', { error: error.message });
+      throw error;
+    } finally {
+      await this.browserManager.close();
+      await this.database.disconnect();
+    }
+  }
+}
+
+// Run pipeline
+if (require.main === module) {
+  const pipeline = new ScraperPipeline();
+  pipeline
+    .run()
+    .catch((error) => {
+      logger.error('Fatal error', { error: error.message });
+      process.exit(1);
+    });
+}
+
+module.exports = { ScraperPipeline };
