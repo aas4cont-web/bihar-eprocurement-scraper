@@ -1,4 +1,3 @@
-// src/validators/tender.js
 const { tenderSchema } = require('./schema');
 const logger = require('../utils/logger');
 

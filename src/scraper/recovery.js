@@ -1,1 +1,37 @@
-/**\n * Recovery ladder for failed tenders\n * Level 1: Close modal\n * Level 2: Escape key\n * Level 3: Retry click\n * Level 4: Reload page\n * Level 5: Restart browser\n */\n\nconst logger = require('../utils/logger');\n\nclass RecoveryManager {\n  constructor(page, log) {\n    this.page = page;\n    this.logger = log;\n  }\n\n  async executeRecoveryLadder(retryLevel = 1) {\n    try {\n      if (retryLevel === 1) {\n        this.logger.info('🔧 Recovery Level 1: Close modal');\n        await this.closeModal();\n      } else if (retryLevel === 2) {\n        this.logger.info('🔧 Recovery Level 2: Press Escape');\n        await this.page.press('Escape');\n        await this.page.waitForTimeout(500);\n      } else if (retryLevel === 3) {\n        this.logger.info('🔧 Recovery Level 3: Reload page');\n        await this.page.reload({ waitUntil: 'domcontentloaded' });\n        await this.page.waitForTimeout(1000);\n      } else if (retryLevel >= 4) {\n        this.logger.info('🔧 Recovery Level 4: Page reset');\n        await this.page.evaluate(() => {\n          document.body.innerHTML = '';\n        });\n      }\n    } catch (error) {\n      this.logger.warn('Recovery step failed', { error: error.message, level: retryLevel });\n    }\n  }\n\n  async closeModal() {\n    try {\n      const closeBtn = await this.page.$('.modal-header .close, button[aria-label=\"Close\"]');\n      if (closeBtn) {\n        await closeBtn.click();\n        await this.page.waitForTimeout(500);\n      }\n    } catch (error) {\n      this.logger.warn('Failed to close modal', { error: error.message });\n    }\n  }\n}\n\nmodule.exports = { RecoveryManager };\n
+const logger = require('../utils/logger');
+
+class RecoveryManager {
+  constructor(page, log) {
+    this.page = page;
+    this.logger = log;
+  }
+
+  async executeRecoveryLadder(level) {
+    try {
+      switch (level) {
+        case 1:
+          this.logger.info('🔄 Recovery L1: Close modal');
+          await this.page.keyboard.press('Escape');
+          break;
+        case 2:
+          this.logger.info('🔄 Recovery L2: Clear DOM');
+          await this.page.evaluate(() => {
+            const modals = document.querySelectorAll('[role="dialog"], .modal');
+            modals.forEach((m) => m.remove());
+          });
+          break;
+        case 3:
+          this.logger.info('🔄 Recovery L3: Reload page');
+          await this.page.reload({ waitUntil: 'domcontentloaded' });
+          break;
+        default:
+          this.logger.info('🔄 Recovery: Wait');
+          await this.page.waitForTimeout(2000);
+      }
+    } catch (error) {
+      this.logger.warn('Recovery step failed', { error: error.message });
+    }
+  }
+}
+
+module.exports = { RecoveryManager };
